@@ -47,6 +47,26 @@ class Settings(BaseSettings):
     MONGO_SOCKET_TIMEOUT_MS: int = Field(default=60000)   # 套接字超时：60秒（原为20秒）
     MONGO_SERVER_SELECTION_TIMEOUT_MS: int = Field(default=5000)  # 服务器选择超时：5秒
 
+    # PostgreSQL 配置
+    POSTGRES_HOST: str = Field(default="localhost")
+    POSTGRES_PORT: int = Field(default=5432)
+    POSTGRES_DB: str = Field(default="tradingagents")
+    POSTGRES_USER: str = Field(default="tradinguser")
+    POSTGRES_PASSWORD: str = Field(default="")
+    POSTGRES_MAX_CONNECTIONS: int = Field(default=20)
+    POSTGRES_MIN_CONNECTIONS: int = Field(default=5)
+    POSTGRES_CONNECT_TIMEOUT_MS: int = Field(default=30000)
+
+    @property
+    def POSTGRES_URL(self) -> str:
+        """构建 PostgreSQL 连接 URL (异步)"""
+        return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+    @property
+    def POSTGRES_URL_SYNC(self) -> str:
+        """构建同步 PostgreSQL 连接 URL"""
+        return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
     @property
     def MONGO_URI(self) -> str:
         """构建MongoDB URI"""
