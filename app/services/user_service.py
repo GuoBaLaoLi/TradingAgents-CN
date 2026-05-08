@@ -412,6 +412,29 @@ class UserService:
             logger.error(f"❌ 激活用户失败: {e}")
             return False
 
+    async def get_user_from_postgres(self, username: str) -> Optional[dict]:
+        """从 PostgreSQL 获取用户"""
+        from app.services.data_access_service import get_data_access
+        
+        try:
+            da = await get_data_access()
+            user = await da.user.get_by_username(username)
+            if user:
+                result = {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "is_active": user.is_active,
+                    "is_admin": user.is_admin,
+                    "created_at": user.created_at.isoformat() if user.created_at else None
+                }
+                await da.close()
+                return result
+            await da.close()
+        except Exception as e:
+            logger.warning(f"PostgreSQL 用户查询失败: {e}")
+        return None
+
 
 # 全局用户服务实例
 user_service = UserService()

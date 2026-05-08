@@ -284,3 +284,32 @@ class UnifiedStockService:
             }
         ]
 
+    async def get_stock_from_postgres(self, symbol: str) -> Optional[dict]:
+        """从 PostgreSQL 获取股票数据"""
+        from app.services.data_access_service import get_data_access
+        
+        try:
+            da = await get_data_access()
+            stock = await da.stock.get_by_symbol(symbol)
+            if stock:
+                result = {
+                    "symbol": stock.symbol,
+                    "name": stock.name,
+                    "full_symbol": stock.full_symbol,
+                    "industry": stock.industry,
+                    "market": stock.market,
+                    "list_date": str(stock.list_date) if stock.list_date else None,
+                    "source": stock.source,
+                    "total_mv": float(stock.total_mv) if stock.total_mv else None,
+                    "circ_mv": float(stock.circ_mv) if stock.circ_mv else None,
+                    "pe": float(stock.pe) if stock.pe else None,
+                    "pb": float(stock.pb) if stock.pb else None,
+                    "roe": float(stock.roe) if stock.roe else None
+                }
+                await da.close()
+                return result
+            await da.close()
+        except Exception as e:
+            logger.warning(f"PostgreSQL 查询失败: {e}")
+        return None
+

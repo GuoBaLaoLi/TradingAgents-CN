@@ -672,3 +672,44 @@ class QuotesIngestionService:
                 error_msg=str(e)
             )
 
+    async def save_to_postgres(self, quote_data: dict) -> bool:
+        """保存行情数据到 PostgreSQL"""
+        from app.services.data_access_service import get_data_access
+        from app.models.postgresql_models import MarketQuotes
+
+        try:
+            da = await get_data_access()
+
+            existing = await da.market.get_by_symbol(quote_data.get("code", ""))
+
+            if existing:
+                existing.close = quote_data.get("close")
+                existing.open = quote_data.get("open")
+                existing.high = quote_data.get("high")
+                existing.low = quote_data.get("low")
+                existing.pct_chg = quote_data.get("pct_chg")
+                existing.amount = quote_data.get("amount")
+                existing.volume = quote_data.get("volume")
+                await da.session.flush()
+            else:
+                quote = MarketQuotes(
+                    symbol=quote_data.get("code", ""),
+                    full_symbol=quote_data.get("full_symbol"),
+                    close=quote_data.get("close"),
+                    open=quote_data.get("open"),
+                    high=quote_data.get("high"),
+                    low=quote_data.get("low"),
+                    pct_chg=quote_data.get("pct_chg"),
+                    amount=quote_data.get("amount"),
+                    volume=quote_data.get("volume"),
+                    data_source=quote_data.get("source", "akshare")
+                )
+                await da.market.create(quote)
+
+            await da.session.commit()
+            await da.close()
+            return True
+        except Exception as e:
+            logger.error(f"保存到 PostgreSQL 失败: {e}")
+            return False
+
