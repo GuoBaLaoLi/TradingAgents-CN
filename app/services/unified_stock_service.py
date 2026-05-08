@@ -288,8 +288,8 @@ class UnifiedStockService:
         """从 PostgreSQL 获取股票数据"""
         from app.services.data_access_service import get_data_access
         
+        da = await get_data_access()
         try:
-            da = await get_data_access()
             stock = await da.stock.get_by_symbol(symbol)
             if stock:
                 result = {
@@ -306,10 +306,10 @@ class UnifiedStockService:
                     "pb": float(stock.pb) if stock.pb else None,
                     "roe": float(stock.roe) if stock.roe else None
                 }
-                await da.close()
                 return result
-            await da.close()
         except Exception as e:
             logger.warning(f"PostgreSQL 查询失败: {e}")
+        finally:
+            await da.close()
         return None
 

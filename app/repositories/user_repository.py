@@ -2,6 +2,7 @@
 用户仓库
 提供用户数据的 CRUD 操作
 """
+import hashlib
 from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +31,17 @@ class UserRepository(BaseRepository[Users]):
         )
         return result.scalar_one_or_none()
 
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        """密码哈希"""
+        return hashlib.sha256(password.encode()).hexdigest()
+
     async def authenticate(self, username: str, password: str) -> Optional[Users]:
-        """验证用户登录（简化版本）"""
+        """验证用户登录"""
         user = await self.get_by_username(username)
-        return user
+        if not user:
+            return None
+        password_hash = self._hash_password(password)
+        if user.hashed_password == password_hash:
+            return user
+        return None

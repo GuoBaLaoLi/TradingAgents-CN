@@ -416,8 +416,8 @@ class UserService:
         """从 PostgreSQL 获取用户"""
         from app.services.data_access_service import get_data_access
         
+        da = await get_data_access()
         try:
-            da = await get_data_access()
             user = await da.user.get_by_username(username)
             if user:
                 result = {
@@ -428,11 +428,11 @@ class UserService:
                     "is_admin": user.is_admin,
                     "created_at": user.created_at.isoformat() if user.created_at else None
                 }
-                await da.close()
                 return result
-            await da.close()
         except Exception as e:
             logger.warning(f"PostgreSQL 用户查询失败: {e}")
+        finally:
+            await da.close()
         return None
 
 

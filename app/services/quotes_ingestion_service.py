@@ -677,9 +677,8 @@ class QuotesIngestionService:
         from app.services.data_access_service import get_data_access
         from app.models.postgresql_models import MarketQuotes
 
+        da = await get_data_access()
         try:
-            da = await get_data_access()
-
             existing = await da.market.get_by_symbol(quote_data.get("code", ""))
 
             if existing:
@@ -707,9 +706,11 @@ class QuotesIngestionService:
                 await da.market.create(quote)
 
             await da.session.commit()
-            await da.close()
             return True
         except Exception as e:
             logger.error(f"保存到 PostgreSQL 失败: {e}")
+            await da.session.rollback()
             return False
+        finally:
+            await da.close()
 
