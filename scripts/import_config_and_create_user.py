@@ -38,13 +38,21 @@ def load_env_config(script_dir: Path) -> dict:
         script_dir: 脚本所在目录
 
     Returns:
-        配置字典，包含 mongodb_port 等
+        配置字典，包含 postgres 和 mongodb 配置
     """
     # 查找 .env 文件（在项目根目录）
     env_file = script_dir.parent / '.env'
 
     config = {
-        'mongodb_port': 27017,  # 默认端口
+        # PostgreSQL 配置（默认数据库）
+        'postgres_host': 'localhost',
+        'postgres_port': 5432,
+        'postgres_db': 'tradingagents',
+        'postgres_user': 'tradinguser',
+        'postgres_password': '',
+
+        # MongoDB 配置（保留，兼容旧版本）
+        'mongodb_port': 27017,
         'mongodb_host': 'localhost',
         'mongodb_username': 'admin',
         'mongodb_password': 'tradingagents123',
@@ -65,7 +73,19 @@ def load_env_config(script_dir: Path) -> dict:
                         key = key.strip()
                         value = value.strip()
 
-                        if key == 'MONGODB_PORT':
+                        # PostgreSQL 配置
+                        if key == 'POSTGRES_HOST':
+                            config['postgres_host'] = value
+                        elif key == 'POSTGRES_PORT':
+                            config['postgres_port'] = int(value)
+                        elif key == 'POSTGRES_DB':
+                            config['postgres_db'] = value
+                        elif key == 'POSTGRES_USER':
+                            config['postgres_user'] = value
+                        elif key == 'POSTGRES_PASSWORD':
+                            config['postgres_password'] = value
+                        # MongoDB 配置
+                        elif key == 'MONGODB_PORT':
                             config['mongodb_port'] = int(value)
                         elif key == 'MONGODB_HOST':
                             config['mongodb_host'] = value
@@ -281,65 +301,262 @@ def load_export_file(file_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-def connect_mongodb(use_docker: bool = True, config: dict = None) -> MongoClient:
-    """连接到 MongoDB
+def connect_postgresql(config: dict = None) -> Any:
+    """连接到 PostgreSQL
 
     Args:
-        use_docker: True=在 Docker 容器内运行（使用 mongodb 服务名）
-                   False=在宿主机运行（使用 localhost）
-        config: 配置字典，包含端口等信息
+        config: 配置字典，包含 postgres_host, postgres_port 等
+
+    Returns:
+        SQLAlchemy session 对象
     """
+    # 导入 SQLAlchemy
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    # 尝试导入 PostgreSQL 模型（用于创建表）
+    try:
+        from app.models.postgresql_models import Base
+    except ImportError:
+        print(f"⚠️  警告: 无法导入 PostgreSQL 模型，将跳过表创建")
+        Base = None
+
     if config is None:
         config = {
-            'mongodb_port': 27017,
-            'mongodb_host': 'localhost',
-            'mongodb_username': 'admin',
-            'mongodb_password': 'tradingagents123',
-            'mongodb_database': 'tradingagents',
-            'mongodb_auth_source': 'admin',
-            'mongodb_connection_string': None,
+            'postgres_host': 'localhost',
+            'postgres_port': 5432,
+            'postgres_db': 'tradingagents',
+            'postgres_user': 'tradinguser',
+            'postgres_password': '',
         }
 
-    database = config['mongodb_database']
-    auth_source = config.get('mongodb_auth_source') or 'admin'
-    mongo_uri = config.get('mongodb_connection_string')
-    env_name = "Docker 容器内" if use_docker else "宿主机"
+    host = config.get('postgres_host', 'localhost')
+    port = config.get('postgres_port', 5432)
+    database = config.get('postgres_db', 'tradingagents')
+    user = config.get('postgres_user', 'tradinguser')
+    password = config.get('postgres_password', '')
 
-    if not mongo_uri:
-        # 构建 MongoDB URI
-        host = 'mongodb' if use_docker else config['mongodb_host']
-        port = config['mongodb_port']
-        username = config['mongodb_username']
-        password = config['mongodb_password']
-        mongo_uri = f"mongodb://{username}:{password}@{host}:{port}/{database}?authSource={auth_source}"
-        masked_uri = f"mongodb://{username}:***@{host}:{port}/{database}?authSource={auth_source}"
-    else:
-        # 如果是 Docker 模式，并且 .env 写的是 localhost，则替换成容器内服务名
-        if use_docker:
-            mongo_uri = mongo_uri.replace("@localhost:", "@mongodb:")
-            mongo_uri = mongo_uri.replace("//localhost:", "//mongodb:")
-        masked_uri = re.sub(r"://([^:/]+):([^@]+)@", r"://\1:***@", mongo_uri)
+    if not password:
+        print(f"❌ 错误: PostgreSQL 密码未设置")
+        print(f"   请在 .env 文件中设置 POSTGRES_PASSWORD 或使用 --postgres-password 参数")
+        sys.exit(1)
 
-    print(f"\n🔌 连接到 MongoDB ({env_name})...")
-    print(f"   URI: {masked_uri}")
-    print(f"   数据库: {database}")
+    # 构建连接字符串
+    database_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+
+    print(f"\n🔌 连接到 PostgreSQL...")
+    print(f"   Host: {host}:{port}")
+    print(f"   Database: {database}")
+    print(f"   User: {user}")
 
     try:
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        # 创建同步引擎
+        engine = create_engine(database_url, pool_pre_ping=True, echo=False)
+
         # 测试连接
-        client.admin.command('ping')
-        print(f"✅ MongoDB 连接成功")
-        return client
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+        print(f"✅ PostgreSQL 连接成功")
+
+        # 创建 Session
+        Session = sessionmaker(bind=engine)
+        session = Session()
+
+        # 创建表（如果不存在）
+        if Base is not None:
+            Base.metadata.create_all(engine)
+            print(f"✅ 数据库表结构已就绪")
+
+        return session
 
     except Exception as e:
-        print(f"❌ 错误: MongoDB 连接失败: {e}")
-        if use_docker:
-            print(f"   请确保在 Docker 容器内运行，或使用 --host 参数在宿主机运行")
-            print(f"   检查容器: docker ps | grep mongodb")
-        else:
-            print(f"   请确保 MongoDB 正在运行并监听端口 {port}")
-            print(f"   检查端口: netstat -an | findstr {port}")
+        print(f"❌ 错误: PostgreSQL 连接失败: {e}")
+        print(f"   请确保 PostgreSQL 正在运行")
+        print(f"   检查服务: sudo systemctl status postgresql")
         sys.exit(1)
+
+
+# ============== 原有 MongoDB 代码（已注释，保留兼容） ==============
+# def connect_mongodb(use_docker: bool = True, config: dict = None) -> MongoClient:
+#     """连接到 MongoDB
+# 
+#     Args:
+#         use_docker: True=在 Docker 容器内运行（使用 mongodb 服务名）
+#                    False=在宿主机运行（使用 localhost）
+#         config: 配置字典，包含端口等信息
+#     """
+#     if config is None:
+#         config = {
+#             'mongodb_port': 27017,
+#             'mongodb_host': 'localhost',
+#             'mongodb_username': 'admin',
+#             'mongodb_password': 'tradingagents123',
+#             'mongodb_database': 'tradingagents',
+#             'mongodb_auth_source': 'admin',
+#             'mongodb_connection_string': None,
+#         }
+#
+#     database = config['mongodb_database']
+#     auth_source = config.get('mongodb_auth_source') or 'admin'
+#     mongo_uri = config.get('mongodb_connection_string')
+#     env_name = "Docker 容器内" if use_docker else "宿主机"
+#
+#     if not mongo_uri:
+#         # 构建 MongoDB URI
+#         host = 'mongodb' if use_docker else config['mongodb_host']
+#         port = config['mongodb_port']
+#         username = config['mongodb_username']
+#         password = config['mongodb_password']
+#         mongo_uri = f"mongodb://{username}:{password}@{host}:{port}/{database}?authSource={auth_source}"
+#         masked_uri = f"mongodb://{username}:***@{host}:{port}/{database}?authSource={auth_source}"
+#     else:
+#         # 如果是 Docker 模式，并且 .env 写的是 localhost，则替换成容器内服务名
+#         if use_docker:
+#             mongo_uri = mongo_uri.replace("@localhost:", "@mongodb:")
+#             mongo_uri = mongo_uri.replace("//localhost:", "//mongodb:")
+#         masked_uri = re.sub(r"://([^:/]+):([^@]+)@", r"://\1:***@", mongo_uri)
+#
+#     print(f"\n🔌 连接到 MongoDB ({env_name})...")
+#     print(f"   URI: {masked_uri}")
+#     print(f"   数据库: {database}")
+#
+#     try:
+#         client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+#         # 测试连接
+#         client.admin.command('ping')
+#         print(f"✅ MongoDB 连接成功")
+#         return client
+#
+#     except Exception as e:
+#         print(f"❌ 错误: MongoDB 连接失败: {e}")
+#         if use_docker:
+#             print(f"   请确保在 Docker 容器内运行，或使用 --host 参数在宿主机运行")
+#             print(f"   检查容器: docker ps | grep mongodb")
+#         else:
+#             print(f"   请确保 MongoDB 正在运行并监听端口 {port}")
+#             print(f"   检查端口: netstat -an | findstr {port}")
+#         sys.exit(1)
+# ================================================================
+
+
+def import_to_postgresql(
+    session: Any,
+    table_name: str,
+    documents: List[Dict[str, Any]],
+    overwrite: bool = False
+) -> Dict[str, int]:
+    """导入数据到 PostgreSQL 表
+
+    Args:
+        session: SQLAlchemy session
+        table_name: 表名（如 'users', 'system_configs'）
+        documents: 要插入的文档列表
+        overwrite: 是否覆盖现有数据
+
+    Returns:
+        导入统计信息
+    """
+    # 尝试导入 PostgreSQL 模型
+    try:
+        from app.models.postgresql_models import Base
+    except ImportError as e:
+        print(f"   ⚠️  无法导入 PostgreSQL 模型: {e}")
+        return {"deleted": 0, "inserted": 0, "skipped": 0}
+
+    # 表名映射：MongoDB 集合名 -> PostgreSQL 表名
+    table_name_mapping = {
+        "users": "users",
+        "system_configs": "system_config",
+        "llm_providers": "model_config",
+        "model_catalog": "model_config",
+    }
+    pg_table_name = table_name_mapping.get(table_name, table_name)
+
+    # 尝试找到对应的模型类
+    table_class = None
+    for cls in Base.__subclasses__():
+        if hasattr(cls, '__tablename__') and cls.__tablename__ == pg_table_name:
+            table_class = cls
+            break
+
+    if table_class is None:
+        print(f"   ⚠️  表 {pg_table_name} 未找到对应的模型类，跳过导入")
+        return {"deleted": 0, "inserted": 0, "skipped": 0}
+
+    print(f"   导入到 PostgreSQL 表: {pg_table_name}")
+
+    try:
+        if overwrite:
+            # 覆盖模式：删除现有数据
+            deleted_count = session.query(table_class).delete()
+            session.commit()
+
+            # 批量插入
+            inserted_count = 0
+            for doc in documents:
+                # 过滤掉 MongoDB 特有字段
+                clean_doc = {k: v for k, v in doc.items() if not k.startswith('_')}
+                # 跳过无效字段
+                model_columns = {c.name for c in table_class.__table__.columns}
+                clean_doc = {k: v for k, v in clean_doc.items() if k in model_columns}
+
+                if clean_doc:
+                    obj = table_class(**clean_doc)
+                    session.add(obj)
+                    inserted_count += 1
+
+            session.commit()
+
+            return {
+                "deleted": deleted_count,
+                "inserted": inserted_count,
+                "skipped": 0
+            }
+        else:
+            # 增量模式：跳过已存在的数据
+            inserted_count = 0
+            skipped_count = 0
+
+            for doc in documents:
+                # 过滤掉 MongoDB 特有字段
+                clean_doc = {k: v for k, v in doc.items() if not k.startswith('_')}
+                # 跳过无效字段
+                model_columns = {c.name for c in table_class.__table__.columns}
+                clean_doc = {k: v for k, v in clean_doc.items() if k in model_columns}
+
+                if not clean_doc:
+                    continue
+
+                # 尝试根据主键检查是否存在
+                primary_key = table_class.__table__.primary_key
+                if primary_key.columns:
+                    pk_name = primary_key.columns[0].name
+                    pk_value = clean_doc.get(pk_name)
+
+                    if pk_value:
+                        existing = session.query(table_class).filter(
+                            getattr(table_class, pk_name) == pk_value
+                        ).first()
+                        if existing:
+                            skipped_count += 1
+                            continue
+
+                obj = table_class(**clean_doc)
+                session.add(obj)
+                session.commit()
+                inserted_count += 1
+
+            return {
+                "deleted": 0,
+                "inserted": inserted_count,
+                "skipped": skipped_count
+            }
+
+    except Exception as e:
+        print(f"   ❌ 导入失败: {e}")
+        session.rollback()
+        return {"deleted": 0, "inserted": 0, "skipped": 0}
 
 
 def import_collection(
@@ -397,35 +614,41 @@ def import_collection(
         }
 
 
-def create_default_admin(db: Any, overwrite: bool = False) -> bool:
-    """创建默认管理员用户"""
-    print(f"\n👤 创建默认管理员用户...")
-    
-    users_collection = db.users
-    
+def create_default_admin_postgresql(session: Any, overwrite: bool = False) -> bool:
+    """在 PostgreSQL 中创建默认管理员用户"""
+    from app.models.postgresql_models import Users
+    from datetime import datetime
+
+    print(f"\n👤 创建默认管理员用户 (PostgreSQL)...")
+
     # 检查用户是否已存在
-    existing_user = users_collection.find_one({"username": DEFAULT_ADMIN["username"]})
-    
+    existing_user = session.query(Users).filter(
+        Users.username == DEFAULT_ADMIN["username"]
+    ).first()
+
     if existing_user:
         if not overwrite:
             print(f"⚠️  用户 '{DEFAULT_ADMIN['username']}' 已存在，跳过创建")
             return False
         else:
-            print(f"⚠️  用户 '{DEFAULT_ADMIN['username']}' 已存在，将覆盖")
-            users_collection.delete_one({"username": DEFAULT_ADMIN["username"]})
-    
-    # 创建用户文档
-    user_doc = {
-        "username": DEFAULT_ADMIN["username"],
-        "email": DEFAULT_ADMIN["email"],
-        "hashed_password": hash_password(DEFAULT_ADMIN["password"]),
-        "is_active": True,
-        "is_verified": True,
-        "is_admin": True,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-        "last_login": None,
-        "preferences": {
+            print(f"⚠️  用户 '{DEFAULT_ADMIN['username']}' 已存在，将删除后重建")
+            session.query(Users).filter(
+                Users.username == DEFAULT_ADMIN["username"]
+            ).delete()
+            session.commit()
+
+    # 创建用户对象
+    user = Users(
+        username=DEFAULT_ADMIN["username"],
+        email=DEFAULT_ADMIN["email"],
+        hashed_password=hash_password(DEFAULT_ADMIN["password"]),
+        is_active=True,
+        is_verified=True,
+        is_admin=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+        last_login=None,
+        preferences={
             "default_market": "A股",
             "default_depth": "深度",
             "ui_theme": "light",
@@ -433,23 +656,80 @@ def create_default_admin(db: Any, overwrite: bool = False) -> bool:
             "notifications_enabled": True,
             "email_notifications": False
         },
-        "daily_quota": 10000,
-        "concurrent_limit": 10,
-        "total_analyses": 0,
-        "successful_analyses": 0,
-        "failed_analyses": 0,
-        "favorite_stocks": []
-    }
-    
-    users_collection.insert_one(user_doc)
-    
-    print(f"✅ 默认管理员用户创建成功")
+        daily_quota=10000,
+        concurrent_limit=10,
+        total_analyses=0,
+        successful_analyses=0,
+        failed_analyses=0
+    )
+
+    session.add(user)
+    session.commit()
+
+    print(f"✅ 默认管理员用户创建成功 (PostgreSQL)")
     print(f"   用户名: {DEFAULT_ADMIN['username']}")
     print(f"   密码: {DEFAULT_ADMIN['password']}")
     print(f"   邮箱: {DEFAULT_ADMIN['email']}")
     print(f"   角色: 管理员")
-    
+
     return True
+
+
+# ============== 原有 MongoDB 代码（已注释，保留兼容） ==============
+# def create_default_admin(db: Any, overwrite: bool = False) -> bool:
+#     """创建默认管理员用户（MongoDB 版本）"""
+#     print(f"\n👤 创建默认管理员用户...")
+#
+#     users_collection = db.users
+#
+#     # 检查用户是否已存在
+#     existing_user = users_collection.find_one({"username": DEFAULT_ADMIN["username"]})
+#
+#     if existing_user:
+#         if not overwrite:
+#             print(f"⚠️  用户 '{DEFAULT_ADMIN['username']}' 已存在，跳过创建")
+#             return False
+#         else:
+#             print(f"⚠️  用户 '{DEFAULT_ADMIN['username']}' 已存在，将覆盖")
+#             users_collection.delete_one({"username": DEFAULT_ADMIN["username"]})
+#
+#     # 创建用户文档
+#     user_doc = {
+#         "username": DEFAULT_ADMIN["username"],
+#         "email": DEFAULT_ADMIN["email"],
+#         "hashed_password": hash_password(DEFAULT_ADMIN["password"]),
+#         "is_active": True,
+#         "is_verified": True,
+#         "is_admin": True,
+#         "created_at": datetime.utcnow(),
+#         "updated_at": datetime.utcnow(),
+#         "last_login": None,
+#         "preferences": {
+#             "default_market": "A股",
+#             "default_depth": "深度",
+#             "ui_theme": "light",
+#             "language": "zh-CN",
+#             "notifications_enabled": True,
+#             "email_notifications": False
+#         },
+#         "daily_quota": 10000,
+#         "concurrent_limit": 10,
+#         "total_analyses": 0,
+#         "successful_analyses": 0,
+#         "failed_analyses": 0,
+#         "favorite_stocks": []
+#     }
+#
+#     users_collection.insert_one(user_doc)
+#
+#     print(f"✅ 默认管理员用户创建成功")
+#     print(f"   用户名: {DEFAULT_ADMIN['username']}")
+#     print(f"   密码: {DEFAULT_ADMIN['password']}")
+#     print(f"   邮箱: {DEFAULT_ADMIN['email']}")
+#     print(f"   角色: 管理员")
+#
+#     return True
+# ================================================================
 
 
 def main():
@@ -516,6 +796,32 @@ def main():
         help="跳过创建默认用户"
     )
     parser.add_argument(
+        "--db",
+        choices=["postgres", "mongodb"],
+        default="postgres",
+        help="数据库类型：postgres (默认) 或 mongodb"
+    )
+    parser.add_argument(
+        "--postgres-host",
+        type=str,
+        help="PostgreSQL 主机（覆盖 .env 配置）"
+    )
+    parser.add_argument(
+        "--postgres-port",
+        type=int,
+        help="PostgreSQL 端口（覆盖 .env 配置）"
+    )
+    parser.add_argument(
+        "--postgres-user",
+        type=str,
+        help="PostgreSQL 用户名（覆盖 .env 配置）"
+    )
+    parser.add_argument(
+        "--postgres-password",
+        type=str,
+        help="PostgreSQL 密码（覆盖 .env 配置）"
+    )
+    parser.add_argument(
         "--mongodb-port",
         type=int,
         help="MongoDB 端口（覆盖 .env 配置）"
@@ -548,7 +854,7 @@ def main():
             parser.error("必须提供导出文件路径，或使用 --create-user-only")
     
     print("=" * 80)
-    print("📦 导入配置数据并创建默认用户")
+    print(f"📦 导入配置数据并创建默认用户 (数据库: {args.db})")
     print("=" * 80)
 
     # 加载 .env 配置
@@ -556,21 +862,42 @@ def main():
     env_config = load_env_config(script_dir)
 
     # 命令行参数覆盖 .env 配置
-    if args.mongodb_port:
-        env_config['mongodb_port'] = args.mongodb_port
-        print(f"💡 使用命令行指定的 MongoDB 端口: {args.mongodb_port}")
-    if args.mongodb_host:
-        env_config['mongodb_host'] = args.mongodb_host
-        print(f"💡 使用命令行指定的 MongoDB 主机: {args.mongodb_host}")
-        # 主机被显式覆盖时，不再复用 .env 里的完整连接串
-        env_config['mongodb_connection_string'] = None
+    if args.db == 'postgres':
+        # PostgreSQL 配置覆盖
+        if args.postgres_host:
+            env_config['postgres_host'] = args.postgres_host
+            print(f"💡 使用命令行指定的 PostgreSQL 主机: {args.postgres_host}")
+        if args.postgres_port:
+            env_config['postgres_port'] = args.postgres_port
+            print(f"💡 使用命令行指定的 PostgreSQL 端口: {args.postgres_port}")
+        if args.postgres_user:
+            env_config['postgres_user'] = args.postgres_user
+            print(f"💡 使用命令行指定的 PostgreSQL 用户: {args.postgres_user}")
+        if args.postgres_password:
+            env_config['postgres_password'] = args.postgres_password
+            print(f"💡 使用命令行指定的 PostgreSQL 密码: ***")
+    else:
+        # MongoDB 配置覆盖
+        if args.mongodb_port:
+            env_config['mongodb_port'] = args.mongodb_port
+            print(f"💡 使用命令行指定的 MongoDB 端口: {args.mongodb_port}")
+        if args.mongodb_host:
+            env_config['mongodb_host'] = args.mongodb_host
+            print(f"💡 使用命令行指定的 MongoDB 主机: {args.mongodb_host}")
+            # 主机被显式覆盖时，不再复用 .env 里的完整连接串
+            env_config['mongodb_connection_string'] = None
 
     # 连接数据库
-    use_docker = not args.host  # 默认在 Docker 内运行，除非指定 --host
-    client = connect_mongodb(use_docker=use_docker, config=env_config)
-    db_name = env_config['mongodb_database']
-    db = client[db_name]
-    print(f"🎯 当前导入目标数据库: {db_name}")
+    db_type = args.db
+    if db_type == 'postgres':
+        session = connect_postgresql(config=env_config)
+        db_name = env_config['postgres_db']
+        print(f"🎯 当前导入目标数据库: {db_name} (PostgreSQL)")
+    else:
+        # MongoDB 模式（已注释，仅兼容）
+        print(f"⚠️  MongoDB 模式已禁用，请使用 --db postgres")
+        print(f"   如需使用 MongoDB，请手动启用注释代码")
+        sys.exit(1)
     
     # 导入数据
     if not args.create_user_only:
@@ -603,21 +930,27 @@ def main():
             if collection_name not in data:
                 print(f"⚠️  跳过 {collection_name}: 导出文件中不存在")
                 continue
-            
+
             documents = data[collection_name]
             print(f"\n   导入 {collection_name}...")
-            
+
             try:
-                stats = import_collection(db, collection_name, documents, args.overwrite)
+                if db_type == 'postgres':
+                    stats = import_to_postgresql(session, collection_name, documents, args.overwrite)
+                else:
+                    # MongoDB 模式（已注释）
+                    stats = {"deleted": 0, "inserted": 0, "skipped": 0}
+                    print(f"      ⚠️  MongoDB 导入已禁用")
+
                 total_stats["deleted"] += stats["deleted"]
                 total_stats["inserted"] += stats["inserted"]
                 total_stats["skipped"] += stats["skipped"]
-                
+
                 if args.overwrite:
                     print(f"      ✅ 删除 {stats['deleted']} 个，插入 {stats['inserted']} 个")
                 else:
                     print(f"      ✅ 插入 {stats['inserted']} 个，跳过 {stats['skipped']} 个")
-            
+
             except Exception as e:
                 print(f"      ❌ 失败: {e}")
         
@@ -630,10 +963,19 @@ def main():
     
     # 创建默认用户
     if not args.skip_user:
-        create_default_admin(db, args.overwrite)
-    
+        if db_type == 'postgres':
+            create_default_admin_postgresql(session, args.overwrite)
+        else:
+            # MongoDB 模式（已注释）
+            pass
+
     # 关闭连接
-    client.close()
+    if db_type == 'postgres':
+        session.close()
+    else:
+        # MongoDB 模式（已注释）
+        # client.close()
+        pass
     
     print("\n" + "=" * 80)
     print("✅ 操作完成！")
